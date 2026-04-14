@@ -1,143 +1,55 @@
-# Style Profiles — `contacts.json`
+# Contacts & Profiles
 
-Per-contact style profiles + Dario's global writing style. Used to build the system prompt that tells the LLM how to write messages "as Dario."
+## Contact Settings
 
-## File Location
+Each contact has configurable settings stored in the `contacts` table:
 
-```
-backend/styleguides/contacts.json
-../styleguides/contacts.json  (same file, synced)
-```
+| Column | Type | Purpose |
+|--------|------|---------|
+| `id` | INTEGER PK | Auto-increment |
+| `name` | TEXT | Display name from WhatsApp |
+| `phoneNumber` | TEXT UNIQUE | Phone number, e.g. `31612345678` |
+| `jid` | TEXT | Full WhatsApp JID: `31612345678@s.whatsapp.net` or `31612345678@lid` |
+| `mode` | TEXT | `manual` \| `draft` \| `auto` \| `ignore` — AI behavior |
+| `stage` | TEXT | Current conversation stage (auto-classified, see `01-SYSTEM-OVERVIEW.md`) |
+| `notes` | TEXT | Freeform notes — used as context in prompt building |
+| `llm_model` | TEXT | Per-contact model override (optional) |
+| `context_messages` | INTEGER | Per-contact context window override (optional) |
+| `is_group` | BOOLEAN | True for group chats |
 
-Loaded at startup via `prompts.ts → loadContactProfiles()`, cached in memory.
+### Mode meanings
 
-## Meta
+- **`manual`** — no AI involvement; human writes everything
+- **`draft`** — generate a draft, human reviews and sends
+- **`auto`** — generate and send immediately (no human review)
+- **`ignore`** — skip all AI processing for this contact
 
-```json
-{
-  "meta": {
-    "generated": "2026-03-29",
-    "note": "Auto-generated style profiles from conversation analysis. Used by the control center for AI message generation."
-  }
-}
-```
+### Notes field
 
-## Profile Structure
+The `notes` field is the primary per-contact context passed to the LLM. It's freeform text that can include:
+- Relationship context ("met on Hinge, been on 3 dates")
+- Topic preferences ("doesn't like discussing work")
+- Style guidance ("speaks Dutch mostly")
+- Sensitive topics ("asked me to stop asking about her family")
 
-Each profile is a named entry under `profiles`:
+Notes are extracted by `ExtractRelationshipStatus()` in `simplified.go` — the first 2 lines (non-`style:` lines) are injected into the prompt under "## Where things stand:"
 
-```json
-"{ProfileName}": {
-  "jid": "31612644205@s.whatsapp.net",
-  "language": "dutch",
-  "tone": "close friend, bro vibes, unfiltered",
-  "style": "Very casual Dutch...",
-  "emoji_frequency": "moderate",
-  "avg_message_length": "variable",
-  "formality": "very_casual",
-  "sample_phrases": ["man heeft dr gwn binnen gelaten", "ewa ben vrij maar ga chillen"],
-  "note": "Optional freeform note",
-  "never_do": ["optional contact-specific prohibitions"]
-}
-```
+### Stage field
 
-### Field Meanings
+Stage is auto-classified by `stages.classify()` based on message count + keywords. For contacts with >20 messages, `stages.EmbedClassify()` is used as a secondary check. Stage is stored in `contacts.stage` and passed to `BuildSimplifiedPrompt()`.
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `jid` | string | WhatsApp JID used for incoming message matching |
-| `language` | enum | `english`, `dutch`, `mixed_dutch_english` |
-| `tone` | string | Freeform description of conversational tone |
-| `style` | string | Detailed behavioral description for the LLM |
-| `emoji_frequency` | enum | `high`, `moderate`, `low`, `none` |
-| `avg_message_length` | enum | `very_short`, `short`, `medium`, `variable` |
-| `formality` | enum | `very_casual`, `casual`, `casual_work`, `intimate`, etc. |
-| `sample_phrases` | string[] | **Critical.** Real messages Dario has sent to this person |
-| `note` | string? | Special handling instructions |
-| `never_do` | string[]? | Contact-specific things to avoid |
+## JID Matching
 
-## Matching Logic
+WhatsApp uses two JID formats:
+- **Standard:** `31612345678@s.whatsapp.net`
+- **Low ID (privacy mode):** `31612345678@lid`
 
-`findContactProfile(chatId)` in `prompts.ts`:
+Both formats refer to the same phone number. The system matches contacts by phone number extraction — it splits the JID at `@` and uses the phone part for matching.
 
-1. Split `chatId` by `@` → extract phone number (e.g. `31612644205`)
-2. For each profile, match:
-   - Exact JID match: `profile.jid === chatId`
-   - Phone match: `profile.jid.split('@')[0] === phone`
-3. Returns first match
+## Per-Contact Model Override
 
-Note: JIDs with `@lid` (low ID) are matched by phone part only, since WhatsApp can upgrade LID→WhatsApp JID.
+The `llm_model` field on a contact overrides the global default for that contact only. If not set, the global `llm_model` setting is used (default: `openai/gpt-4.1-nano`).
 
-## Global Style — `dario_global_style`
+## Per-Contact Context Override
 
-Applied to every contact, always.
-
-```json
-{
-  "dario_global_style": {
-    "languages": ["dutch", "english"],
-    "language_switching": "Switches based on contact preference...",
-    "common_patterns": [
-      "Short messages, rarely writes paragraphs in chat",
-      "Uses 'u' and 'ur' instead of 'you' and 'your'",
-      "Emoji: 😇🤣😴 most common",
-      "Uses 'Yo', 'Ewa', 'Yess', 'Ai'",
-      "Dutch slang: 'jwz', 'gwn', 'vnv'",
-      "Stickers and GIFs frequently",
-      "Often quotes/replies to specific messages",
-      "Apologetic when late responding ('sorry man ik sliep')",
-      "Tech-literate, drops AI/dev references naturally",
-      "Direct, doesn't beat around the bush"
-    ],
-    "never_do": [
-      "Never write formal or corporate-sounding messages",
-      "Never use proper punctuation consistently",
-      "Never write long paragraphs in casual chats",
-      "Never sign off messages",
-      "Never say 'Hallo' or 'Goedemorgen' to friends"
-    ]
-  }
-}
-```
-
-## Current Profiles
-
-| Profile | JID | Language | Tone | Key traits |
-|---------|-----|----------|------|------------|
-| Call Me By Ur Name | `@lid` | english | flirty, playful | Heavy emoji, stickers, short, teasing |
-| Rudo | `@lid` | english | friendly bro | Tech talk, casual, low emoji |
-| Omar | `@lid` | dutch | transactional | Very short Dutch, shop logistics |
-| Familie | `@g.us` | dutch | warm family | Group chat, kitchen reno, no auto-reply |
-| Bilal Freedom | `@s.whatsapp.net` | dutch | work colleague | Shop ops, direct, business casual |
-| s | `@lid` | english | deep, emotional | Vulnerable exchanges, supportive, longer |
-| B (colleague) | `@lid` | dutch | work brief | Weighing system issues, transactional |
-| B (pin) | `@lid` | dutch | work brief | Payment terminal, minimal |
-| Ghjiulijah | `@s.whatsapp.net` | english | flirty, bold | GIFs, short punchy lines, very casual |
-| Alex (lid) | `@lid` | mixed | close friend | Bro vibes, stickers, memes, Dutch+English mixed |
-| Alex (whatsapp) | `@s.whatsapp.net` | dutch | close friend | Very casual Dutch, memes, unfiltered |
-
-## Important Notes
-
-### Group Chats
-- `Familie` (family group) is marked with `note: "GROUP CHAT - do not auto-reply, only draft"`
-- Auto-mode should be `manual` or `draft` for groups — never `auto`
-
-### LID vs WhatsApp JIDs
-- Some contacts have both `@lid` and `@s.whatsapp.net` JIDs depending on privacy mode
-- The profile matching handles both via phone extraction
-
-### Sample Phrases Are Key
-The `sample_phrases` array is the most powerful part of each profile. These are actual messages Dario has sent. The LLM uses these as anchor examples for style matching.
-
-## Updating Profiles
-
-1. Edit `backend/styleguides/contacts.json`
-2. The file is re-read on next server start (or implement cache invalidation)
-3. Changes affect new message generation immediately if cache-busting reload is added
-
-## Adding a New Contact Profile
-
-1. Add a new entry to `profiles` with a descriptive name
-2. Fill in all fields (especially `sample_phrases`)
-3. The contact must have a matching `jid` or phone number in the DB (`contacts.jid`)
-4. When a message comes in from that JID, the profile is automatically matched
+The `context_messages` setting overrides the global `context_messages` setting for that contact only. Default global is 4. Some contacts benefit from more context (deep conversations), others from less (shallow or one-word exchanges).

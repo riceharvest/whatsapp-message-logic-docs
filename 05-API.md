@@ -1,187 +1,271 @@
 # API Endpoints
 
-## Backend: Port 3000
+## Base URL
 
-### Auto-Generate Draft
+Backend serves HTTP on port 8080 (configurable via `--http-port` flag).
 
+---
+
+## Contacts
+
+### `GET /api/contacts`
+
+Returns all contacts sorted by `last_read_at` descending.
+
+**Response:** `200`
+```json
+[{
+  "id": 12,
+  "name": "Jess",
+  "phone": "31612345678",
+  "jid": "31612345678@s.whatsapp.net",
+  "notes": "met on Hinge, 3rd date",
+  "mode": "draft",
+  "llm_model": "",
+  "stage": "flirty",
+  "last_read_at": "2026-04-14T08:00:00Z",
+  "created_at": "2026-03-15T10:00:00Z"
+}]
 ```
-POST /api/auto/generate
-```
 
-Generate a message draft without sending.
+---
+
+### `GET /api/contacts/{id}`
+
+Get a single contact.
+
+---
+
+### `PATCH /api/contacts/{id}`
+
+Update contact settings.
 
 **Request body:**
 ```json
 {
-  "chatId": "31612644205@s.whatsapp.net",
-  "styleName": "Casual",        // optional
-  "customPrompt": "...",        // optional override
-  "contextLimit": 20            // optional, max 100
+  "mode": "auto",
+  "notes": "updated notes",
+  "llm_model": "openai/gpt-4o-mini",
+  "context_messages": 6
+}
+```
+
+All fields optional. Omitted fields are not changed.
+
+---
+
+### `PATCH /api/contacts/draft-mode`
+
+Set mode for all non-ignored contacts.
+
+**Request body:** `{"mode": "draft"|"auto"|"ignore"}`
+
+---
+
+### `GET /api/contacts/{id}/draft-history`
+
+Get last N saved drafts for a contact.
+
+**Query params:** `?limit=20`
+
+---
+
+### `POST /api/contacts/{id}/sync-history`
+
+Sync message history from wacli for a contact.
+
+---
+
+### `POST /api/contacts/import`
+
+Bulk import contacts.
+
+---
+
+### `GET /api/contacts/{id}/prompt-staleness`
+
+Check if the contact's prompt/needs have changed significantly since last draft.
+
+---
+
+## Message Generation
+
+### `POST /api/contacts/{id}/generate`
+
+**Primary generation endpoint.** Generates draft(s) via SSE stream, saves to DB.
+
+**Request body:** none
+
+**Response:** `text/event-stream`
+
+Each event:
+```
+data: {"idx":0,"text":"hey what's up 😊","draft_id":445,"model_used":"openai/gpt-4.1-nano","cost":0.0023}
+```
+
+Errors:
+```
+data: {"idx":0,"error":"generation already in progress"}
+```
+
+**Draft count:** 1 (manual generate). The web UI button and `/generate` command both use this endpoint.
+
+**Alias:** `POST /api/contacts/{id}/generate-stream` — same handler.
+
+---
+
+### `POST /api/contacts/{id}/send-draft`
+
+Send a saved draft (human-approved or auto-sent).
+
+**Request body:**
+```json
+{
+  "draft_id": 445,
+  "edited_text": "optional edited version before sending"
 }
 ```
 
 **Response:**
 ```json
-{
-  "reply": "ewa ben vrij maar ga chillen",
-  "cost": 3,
-  "tokens": 1240
-}
+{"ok": true, "message": "sent", "wacli_id": "true_31612345678@whatsapp.net_ABC123"}
 ```
 
 ---
 
-### Contacts
+### `POST /api/contacts/{id}/reject-all-drafts`
 
-```
-GET /api/contacts
-```
-Returns all contacts sorted by `lastMessageTs` descending.
-
-```
-POST /api/contacts/sync
-```
-Trigger manual full contact sync from wacli. Returns `{ success, synced, changed }`.
-
-```
-PUT /api/contacts/:id
-```
-Update contact settings.
-
-**Body:**
-```json
-{
-  "auto_mode": "draft",
-  "style_prompt": null,
-  "auto_keywords": ["order", "update"],
-  "context_limit": 20,
-  "label": "Lead",
-  "ignored": false
-}
-```
+Reject all pending drafts for a contact.
 
 ---
 
-### Messages
+### `GET /api/contacts/{id}/momentum`
 
-```
-GET /api/chats/:id/messages?limit=50
-```
-Fetch messages for a chat via wacli (live from WhatsApp, not local DB).
+Returns conversation momentum data (reply rate, frequency trends).
 
 ---
 
-### Send Reply
+### `GET /api/contacts/{id}/drift`
 
-```
-POST /api/chats/:id/reply
-```
-Send a manual reply.
-
-**Body:** `{ "text": "Yesss" }`
+Returns style drift analysis — how much the recent drafts differ from chosen history.
 
 ---
 
-### Outbound Queue
+### `GET /api/contacts/{id}/fact-relevance`
 
-```
-GET /api/queue
-```
-List all pending + draft messages.
-
-```
-DELETE /api/queue/drafts
-```
-Cancel all pending drafts.
+Returns extracted facts about the contact and their relevance to current draft.
 
 ---
 
-### Usage Stats
+### `GET /api/contacts/{id}/opener-suggestions`
 
-```
-GET /api/stats
-```
-Today's tokens + cost in cents.
+Returns suggested openers for a contact with no/limited history.
 
 ---
 
-### Styles
+### `POST /api/contacts/{id}/draft-diversity`
 
-```
-GET /api/styles
-```
-List all style presets (DEFAULT_STYLES + DB presets + styleguide.md if present).
-
-```
-POST /api/styles
-```
-Create a new custom style preset.
+Force generation of stylistically diverse drafts (ignores normal duplicate suppression).
 
 ---
 
-### Search
+### `GET /api/contacts/{id}/topics`
 
-```
-GET /api/search?q=order
-```
-Full-text search across contacts + messages.
+Returns conversation topic analysis for this contact.
 
 ---
 
-### WhatsApp Admin
+### `GET /api/contacts/{id}/dead-check`
 
-```
-POST /api/admin/start
-```
-Start the wacli connection.
-
-```
-GET /api/admin/status
-```
-Return `{ connected: true|false }`.
+Check if contact is "dead" (no activity for a threshold).
 
 ---
 
-## Frontend: Port 5173 (static)
+### `GET /api/contacts/{id}/urgent-messages`
 
-Served by the Hono backend via `@hono/node-server/serve-static`. No separate API — all communication is via WebSocket + the REST endpoints above.
-
-## WebSocket — `/ws`
-
-Real-time updates pushed to the UI.
-
-### Client → Server
-
-No client-initiated messages (server is fire-and-forget).
-
-### Server → Client
-
-```ts
-// New inbound message
-{ type: "new_message", chatId, contactId, contact, body, fromMe: false, ts }
-
-// Outbound message sent
-{ type: "message_sent", chatId, body, ts }
-
-// Draft generated
-{ type: "draft_ready", chatId, reply, cost, ts }
-
-// Contact updated
-{ type: "contact_updated", contact, ts }
-
-// Full contact list after sync
-{ type: "contacts_synced", contacts, ts }
-
-// Drafts cancelled
-{ type: "drafts_cancelled", count, ts }
-```
+Returns messages flagged as potentially urgent.
 
 ---
 
-## Environment Variables
+### `GET /api/contacts/{id}/health`
 
-```env
-OPENROUTER_API_KEY=sk-or-...     # Required
-OPENROUTER_MODEL=openai/gpt-4o-mini  # Optional, default: openai/gpt-4o-mini
-PORT=3000                        # Optional, default: 3000
-```
+Returns contact-level health metrics.
+
+---
+
+## Settings
+
+### `GET /api/settings`
+
+List all settings.
+
+---
+
+### `POST /api/settings`
+
+Set a setting.
+
+**Request body:** `{"key": "context_messages", "value": "6"}`
+
+---
+
+## Style Guide
+
+### `GET /api/style-guide`
+
+Returns the current style guide text.
+
+---
+
+### `POST /api/style-guide`
+
+Update the style guide text.
+
+---
+
+## Search
+
+### `GET /api/search?q=query`
+
+Full-text search across contacts and messages.
+
+---
+
+## AB Testing
+
+### `GET /api/ab/model-stats`
+
+Returns per-model draft quality stats (reply rate, avg score) for AB test analysis.
+
+---
+
+## Health
+
+### `GET /health`
+
+Returns `{"ok": true, "uptime": "4h30m", ...}`
+
+---
+
+## Outbound (Legacy)
+
+### `POST /contacts/{id}/send-json`
+
+Send a raw JSON message directly via wacli.
+
+---
+
+## WebSocket
+
+The server pushes real-time events over WebSocket (path: `ws://host/ws`).
+
+### Server → Client events
+
+| Event | Payload | When |
+|-------|---------|------|
+| `new_message` | `{contact_id, name, direction, message, sent_at}` | New WA message arrived |
+| `draft_created` | `{contact_id}` | Draft saved to DB |
+| `drafts_cancelled` | `{contact_id, count}` | Pending drafts rejected |
+| `contact_updated` | `{contact}` | Contact settings changed |
+
+No client → server messages. Client just receives events and updates UI accordingly.

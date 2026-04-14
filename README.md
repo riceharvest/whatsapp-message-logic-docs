@@ -1,29 +1,33 @@
-# whatsapp-message-logic-docs
+# WhatsApp Message Logic
 
-Documentation for Dario's WhatsApp Control Center message generation logic.
+Documentation for the Dario's WhatsApp AI draft generation system.
 
-This repo contains technical documentation about how the AI-powered WhatsApp message drafting system works — system prompts, style profiles, database schema, API endpoints, and lessons learned from real conversations.
+## What's in here
 
-## Contents
-
-- [01-SYSTEM-OVERVIEW](01-SYSTEM-OVERVIEW.md) — Architecture, message flow, core components
-- [02-CONTACTS-PROFILES](02-CONTACTS-PROFILES.md) — Per-contact style profiles (`contacts.json`)
-- [03-SYSTEM-PROMPT](03-SYSTEM-PROMPT.md) — Generated prompt structure + what was learned from the Jess incident
-- [04-DATABASE](04-DATABASE.md) — Drizzle ORM schema
-- [05-API](05-API.md) — REST + WebSocket endpoints
-- [06-TECHNICAL-NOTES](06-TECHNICAL-NOTES.md) — Real-world incidents, bugs, design decisions
-
-## Purpose
-
-This documentation is meant to be shared with another LLM agent so it can review and critique the message generation logic without having to read the source code.
+| File | Description |
+|------|-------------|
+| `01-SYSTEM-OVERVIEW.md` | Pipeline flow, generation paths, stage system |
+| `02-CONTACTS-PROFILES.md` | Contact settings, notes, stage, JID matching |
+| `03-SYSTEM-PROMPT.md` | Full DarioPersona + prompt assembly details |
+| `04-DATABASE.md` | Schema for all tables |
+| `05-API.md` | REST endpoints + WebSocket events |
+| `06-TECHNICAL-NOTES.md` | Decisions, migrations, known issues |
 
 ## Quick Summary
 
-**What it does:** Takes inbound WhatsApp messages, builds a conversation context, generates a reply draft using OpenRouter, and either stores it for human review (`draft` mode) or sends it immediately (`auto` mode).
+The system generates WhatsApp reply drafts for Dario using a **simplified pipeline** (as of 2026-04-13):
 
-**Key components:**
-- `prompts.ts` — builds the system prompt from style presets + `contacts.json`
-- `contacts.json` — per-contact style profiles with sample phrases
-- wacli CLI — WhatsApp backend (no Chrome/Puppeteer)
-- Hono server + WebSocket — serves the UI and broadcasts real-time updates
-- Drizzle ORM + SQLite — local storage for contacts, messages, drafts
+1. Classify conversation stage (intro → getting_to_know → flirty → deep → stale)
+2. Build system prompt: `DarioPersona` + stage directive + contact notes + conversation thread
+3. Single LLM call → draft text → save to DB → push via WebSocket to UI
+
+No embeddings at generation time. No judge. No humanization. Identity-first, not rules-first.
+
+## Key Constants
+
+- **Default model:** `openai/gpt-4.1-nano`
+- **Temperature:** `0.7`
+- **Context window:** 4 messages (intentionally lean)
+- **Auto-draft:** 1 draft per inbound message burst
+- **Manual generate:** 1 draft (web UI button, fixed 2026-04-14)
+- **/generate command:** 3 drafts (Telegram bot)

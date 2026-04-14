@@ -1,181 +1,81 @@
-# WhatsApp Message Generation Logic
+# WhatsApp Message Generation — System Overview
 
-Comprehensive documentation of the system used to generate AI-powered WhatsApp message drafts for Dario.
+## Architecture
 
-## Repository Structure
+The current pipeline is the **Simplified Pipeline** (`DraftSimplified`), introduced 2026-04-13. It replaced an earlier rules-based + few-shot system that produced generic patterns like "lol 😏 u binge watch."
 
-```
-├── backend/
-│   ├── src/
-│   │   ├── openrouter/
-│   │   │   ├── client.ts        # OpenRouter API calls with retry logic
-│   │   │   └── prompts.ts        # System prompt building + style profiles
-│   │   ├── whatsapp/
-│   │   │   ├── client.ts         # wacli CLI wrapper
-│   │   │   ├── manager.ts       # wacli process manager
-│   │   │   └── contact-sync.ts  # Contact cache + sync
-│   │   ├── db/
-│   │   │   ├── index.ts          # DB connection
-│   │   │   └── schema.ts         # Drizzle ORM schema
-│   │   └── index.ts              # Hono server + all routes
-│   ├── styleguides/
-│   │   └── contacts.json         # Per-contact style profiles
-│   └── .env                       # API keys, model config
-├── frontend/
-│   └── (React SPA for UI)
-└── styleguides/
-    └── contacts.json              # Same as backend/styleguides/contacts.json
-```
+The simplified approach is: **identity first, not rules first.** Instead of enumerating do's and don'ts, the model receives who Dario is, what stage the conversation is at, and what's been said recently.
 
-## Core Components
-
-| File | Responsibility |
-|------|---------------|
-| `prompts.ts` | Builds the system prompt from style presets + contact profile |
-| `client.ts` (openrouter) | Calls OpenRouter chat completions API |
-| `contacts.json` | Per-contact style profiles + Dario's global style |
-| `index.ts` | Routes: `/api/auto/generate`, inbound handling, rate limiting |
-
-## Message Generation Flow
+## Pipeline Flow
 
 ```
-Inbound WA message
+Inbound message (or manual generate trigger)
        ↓
-  ignored? → discard
+Debounce deduplication (prevents double-fires)
        ↓
-  autoMode = manual? → discard (draft only)
+Fetch last N conversation messages (default: 4, configurable)
        ↓
-  autoMode = draft/auto
+Classify conversation stage (intro | getting_to_know | flirty | deep | stale)
        ↓
-  keyword filter check (if set)
+BuildSimplifiedPrompt(contactName, contactNotes, stage, fewShots)
+  → DarioPersona (identity block)
+  → Stage directive (FLIRTY / DEEP / GETTING_TO_KNOW tone guidance)
+  → Relationship status from contact notes
+  → Few-shot examples (currently disabled — see Note below)
        ↓
-  rate limit check (30/hour/contact)
+Format conversation thread (relative timestamps, gap separators, media filtered)
        ↓
-  Fetch last N messages via wacli
-  (N = contextLimit, default 20)
+Single LLM call: systemPrompt + formatted thread → draft text
        ↓
-  buildMessages(context) → adds system prompt
-       ↓
-  generateCompletion() → OpenRouter API
-       ↓
-  autoMode=auto  → send immediately
-  autoMode=draft → store in outbound_queue as "draft"
-       ↓
-  WebSocket broadcast to UI
+Save draft to DB → WebSocket broadcast → UI shows draft card
 ```
 
-## Key Files Detail
+**Note on few-shots:** Static few-shot examples were disabled 2026-04-13. The `DarioPersona` identity block is self-sufficient; old chosen drafts in the DB were contaminating output with generic patterns. Re-enable once chosen drafts are curated to match Dario's actual voice.
 
-### `prompts.ts` — System Prompt Building
+## Two Generation Paths
 
-**`buildSystemPrompt(styleName?, customPrompt?, stylePresets?, chatId?)`**
-Priority order:
-1. `customPrompt` — raw override, used directly as system prompt
-2. `chatId` → contact profile from `contacts.json` → built dynamically
-3. `styleName` → preset match from `DEFAULT_STYLES`
-4. Falls back to `DEFAULT_STYLES[0]` (Professional)
+| Path | Trigger | Draft count | Code |
+|------|---------|-------------|------|
+| **Auto-draft** | Inbound WA message (autoMode=draft) | 1 | `handleDebounceFire` in `main.go` |
+| **Manual generate** | `/generate` command or web UI button | 1 (was 3, fixed 2026-04-14) | `HandleAPIGenerateStream` in `generate.go` |
 
-**`buildMessages(context, ...)`**
-- Prepends system prompt as `{ role: "system", content: ... }`
-- Appends conversation context as `{ role: "user" }` (inbound) or `{ role: "assistant" }` (outbound)
-- Context is built by reading the **last N messages** via wacli, ordered oldest→newest
+Both paths use the same `GenerateNOptionsForContact` service method, which calls `DraftSimplified`.
 
-### `contacts.json` — Style Profiles
+## Key Files
 
-**Per-contact profile fields:**
-- `jid` — WhatsApp JID for matching
-- `language` — "english" | "dutch" | "mixed_dutch_english"
-- `tone` — freeform description
-- `style` — detailed behavioral description
-- `emoji_frequency` — "high" | "moderate" | "low" | "none"
-- `avg_message_length` — "very_short" | "short" | "medium" | "variable"
-- `formality` — "very_casual" | "casual" | "casual_work" | "intimate" | etc.
-- `sample_phrases[]` — actual messages Dario has sent (most important)
-- `note` — special handling instructions
-- `never_do[]` — contact-specific prohibitions
+| File | Role |
+|------|------|
+| `internal/llm/simplified.go` | `DarioPersona` constant + `BuildSimplifiedPrompt()` + `ExtractRelationshipStatus()` |
+| `internal/llm/draft_simplified.go` | `DraftSimplified()` — the main generation function |
+| `internal/stages/stages.go` | Stage classification (keyword-based + embedding fallback) |
+| `internal/api/service.go` | `GenerateNOptionsForContact()` — orchestrator |
+| `internal/api/generate.go` | `HandleAPIGenerateStream()` — HTTP SSE handler |
+| `cmd/whatsapp-personal/main.go` | `handleDebounceFire()` — auto-draft on inbound |
 
-**Global style (`dario_global_style`):**
-- `languages[]` — active languages (dutch, english)
-- `language_switching` — when to switch languages
-- `common_patterns[]` — behavioral patterns
-- `never_do[]` — global prohibitions
+## Stage System
 
-### Contact Profile Prompt Assembly
+Contacts are classified into one of five stages:
 
-When a chatId matches a contact, `buildContactStylePrompt(chatId)` assembles:
+| Stage | Trigger | Prompt Directive |
+|-------|---------|-----------------|
+| `intro` | < 10 total messages | "Be curious, ask open-ended questions, keep it light and fun" |
+| `getting_to_know` | 10–30 messages, no keywords | "Show genuine interest, ask follow-ups about their life" |
+| `flirty` | ≥30 messages + flirty keywords | "Be playful and bold, use pet names, tease" |
+| `deep` | ≥60 messages + deep keywords | "Be real and vulnerable, reference things they told you before" |
+| `stale` | No message in 48h | "Re-engage naturally, don't be needy" |
 
-```
-You are ghostwriting WhatsApp messages as Dario. Reply as if you ARE Dario.
+For contacts with >20 messages, an **embedding-based classification** is attempted as a secondary check. Stage vectors are embedded once and cached.
 
-## Dario's General Style
-- Languages: dutch, english
-- [language_switching rule]
-- [each common_pattern]
+## What Changed (2026-04-13)
 
-## Never Do (Global)
-- [each never_do rule]
+Before:
+- Rules + few-shots → generic output ("lol 😏 u binge watch")
+- Many moving parts: embedding lookup, humanization, banned phrase filter, judge scoring
 
-## Contact: {name}
-- Language: {profile.language}
-- Tone: {profile.tone}
-- Style: {profile.style}
-- Emoji frequency: {profile.emoji_frequency}
-- Message length: {profile.avg_message_length}
-- Formality: {profile.formality}
+After:
+- `DarioPersona` identity block → sharp, specific output
+- Single LLM call → no judge, no embedding at generation time
+- Stage-based tone guidance embedded in prompt
+- Few-shots disabled (clean persona sufficient)
 
-## Example Messages Dario Sends to {name}
-- "{phrase1}"
-- "{phrase2}"
-
-## Note: {note}
-
-## Never Do (Contact-Specific)
-- [each contact-level never_do]
-
-Write a single reply message. Match Dario's style exactly for this contact. No meta-commentary, no quotation marks around the reply — just the raw message text.
-```
-
-## Auto-Mode Logic
-
-Three modes per contact:
-- **`manual`** — no AI involvement, human writes everything
-- **`draft`** — generate a draft, store in `outbound_queue`, human reviews and sends
-- **`auto`** — generate and send immediately (no human review)
-
-## Rate Limiting
-
-- **30 messages per contact per hour** (rolling window)
-- Implemented in-memory (not persistent across restarts)
-- Applies to both `draft` and `auto` mode triggers
-
-## Keyword Filtering
-
-If `auto_keywords` is set on a contact, inbound messages must contain at least one keyword to trigger generation. Keywords are case-insensitive substring matched.
-
-## Context Window
-
-- Default: **20 messages** (configurable per contact via `context_limit`)
-- Max: 100
-- Messages are read via `wacli messages list --chat {chatId} --limit {N} --json`
-- Messages fed to the LLM oldest-first
-
-## Model Configuration
-
-- Default model: `openai/gpt-4o-mini`
-- Configurable via `OPENROUTER_MODEL` env var
-- Temperature: 0.7
-- Max tokens: 1000
-
-## Cost Tracking
-
-- `usage` table records: date, model, tokens, cost_cents
-- Cost estimated via `estimateCost()` using per-model pricing table
-- `/api/stats` returns today's total tokens + cost
-
-## OpenRouter Retry Logic
-
-`generateCompletion()` implements:
-- Exponential backoff starting at 1s, capped at 60s
-- Max 5 attempts
-- Respects `Retry-After` header on 429
-- AbortSignal support for cancellation
+The result: cleaner voice, fewer moving parts, lower cost.

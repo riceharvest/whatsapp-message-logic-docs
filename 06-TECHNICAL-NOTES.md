@@ -1,117 +1,107 @@
-# Technical Notes — Real-World Incidents & Decisions
+# Technical Notes
 
-## Jess Incident (2026-04-10) — Conversational Style Failure
+## Simplified Pipeline Migration (2026-04-13)
 
-### What Happened
+### Why the Change
 
-Dario was texting Jess (contact_id=80, 2am her time, Nigerian timezone). After a conversation about recon/scoping solo activities and life direction, Jess pushed back explicitly:
+The previous system used:
+1. Rules-based persona
+2. Static few-shot examples from past chosen drafts
+3. Embedding lookups at generation time
+4. Humanization pass
+5. Banned phrase filter
+6. Judge scoring
 
-> "plus i feel like im talking to an ai, with all the questions u're dropping"
+The result was generic output: "lol 😏 u binge watch" patterns. The model was correctly following rules but producing flat, recognizable AI prose.
 
-> "u had also been using the exact same emoji since 9:54am"
+### What Changed
 
-She then set a hard boundary:
-> "so respectfully, no more questions about it. coz even i, is figuring it all about, still."
-
-### Root Cause
-
-The system prompt (`prompts.ts`) was generating messages that:
-1. Back-to-back questions → interrogative tone
-2. Repeated the same emoji (😇) for hours
-3. Never let a conversational beat breathe — every message was immediately followed by another question
-
-The model was correctly following the style instructions (casual, short messages, sample phrases) but the **conversational mechanics** were broken. Style matching ≠ conversation skill.
-
-### Fixes Applied to System Prompt
+The new pipeline (`DraftSimplified` in `internal/llm/draft_simplified.go`) does one thing:
 
 ```
-- never repeat the same emoji twice in a row
-- vary tone (not every message the same energy)
-- not every message needs a question
-- follow with reaction or observation before another question
-- let the conversation breathe
-- don't therapist / don't small talk
+BuildSimplifiedPrompt() → single LLM call → return text
 ```
 
-### Lessons Learned
+No embeddings at generation time. No judge. No humanization. No banned phrase filter.
 
-1. **Sample phrases and never_do rules cover "what to say" but not "how to flow."** Conversational mechanics (question density, observation-before-probing, emoji variety) need explicit rules in the system prompt.
+The identity block (`DarioPersona`) is self-sufficient — personality + preferences + output rules give the model enough signal to produce sharp output without examples of old drafts.
 
-2. **When someone shares something vulnerable, react first, probe second.** Jess said "depends" about planning vs. going with the flow — that was an opening, not a question to immediately dissect.
+### Few-Shot Disable
 
-3. **The boundary signal.** Jess saying "no more questions about it" is a direct override. The system should recognize boundary-setting language and stop probing that topic.
+Static few-shot examples were disabled because DB-chosen drafts were contaminating the output. The problem: past "chosen" drafts weren't actually good Dario voice — they were just drafts he approved because they were adequate, not because they matched his voice.
 
-4. **Emoji variety is a low-effort high-impact signal of humanness.** Repeating the same emoji for hours is a tell.
+Fix: clean the chosen draft corpus (curated to actually sound like Dario) before re-enabling.
 
-### Recommendations Going Forward
+## Web UI Manual Generate (2026-04-14)
 
-Add to the system prompt generation (`prompts.ts`):
-- A "conversational mechanics" section with question density rules
-- Emoji variety enforcement
-- Boundary signal recognition (explicit requests to stop a topic should be honored)
+Fixed the web UI generate button to produce 1 draft instead of 3.
 
-Add to `contacts.json` as a possible per-contact field:
-- `sensitive_topics[]` — topics where the contact has set explicit boundaries
+**Before:** `POST /api/contacts/{id}/generate-stream` → `GenerateDraftsForContact(ctx, contactID)` → 3 drafts  
+**After:** `HandleAPIGenerateStream` calls `GenerateNOptionsForContact(ctx, contactID, 1)` directly
 
----
+The Telegram `/generate` command also uses `GenerateDraftsForContact` which still generates 3. If you want that changed too, let me know.
 
-## wacli Sync Process Auto-Restart
+## Stage Classification
 
-The `wacli sync --follow --json` process can exit unexpectedly. The `WacliClient` in `client.ts` implements:
+Stage is determined by `stages.classify()` which uses:
+1. **Message count thresholds:** intro (<10), getting_to_know (10-30), deeper (30+)
+2. **Keyword matching:** flirty keywords (cute, gorgeous, miss you, etc.) and deep keywords (love, trust, future, etc.)
+3. **Staleness:** conversations quiet >48h → `stale` stage
 
-- Exponential backoff restart (1s, 2s, 4s... capped at 60s)
-- Max 10 restart attempts before giving up
-- `maxRestartAttempts` guard to prevent infinite restarts
+For contacts with >20 messages, `stages.EmbedClassify()` runs as a secondary check using cosine similarity between the contact's conversation embedding and pre-embedded stage directive vectors. This requires `contact_embeddings` table to have a vector for the contact.
 
-This is transparent to the user — the stream reconnects automatically.
+Stage directive vectors are cached in memory on first embed (`stageVecCache`). Stage directives:
 
----
-
-## Draft Query Bug (2026-04-10)
-
-A subagent ran a query against the local SQLite DB:
-
-```sql
-SELECT d.text, d.created_at FROM drafts d ...
+```
+intro:         "This is a new conversation. Be curious, ask open-ended questions, keep it light and fun."
+getting_to_know: "You are getting to know this person. Show genuine interest in what they share, ask follow-ups about their life."
+flirty:         "The vibe is flirty. Be more playful and bold, use more pet names, tease a little."
+deep:           "This is getting serious/emotional. Be real and vulnerable, reference things they have told you before."
+stale:          "This conversation has been quiet for a while. Re-engage naturally, don't be needy, casually ask what they've been up to."
 ```
 
-Error: `no such column: text` — the column is named `draft_text`.
+## Context Window
 
-Fixed by updating the query to use `d.draft_text`.
+Global default is 4 messages (set in code, `service.go`). The DB `settings` table has `context_messages` defaulting to 40, but that's a legacy value — the code reads the settings table and uses 4.
 
----
+This is intentionally lean: 4 messages keeps the model focused on recent context without overcrowding the prompt. Can be overridden per-contact via the contact's `context_messages` field.
 
-## LID vs Standard JID Matching
+## Temperature
 
-WhatsApp privacy mode uses "low ID" (`@lid`) JIDs. Some contacts have both:
-- `31612644205@lid` (privacy/LID mode)
-- `31612644205@s.whatsapp.net` (standard)
+Global default: `0.7` (set in code + DB). Configurable via `llm_temperature` setting. Per-call override supported via `SimplifiedOpts.Temperature`.
 
-Profile matching in `prompts.ts` handles both by extracting the phone part (`31612644205`) and matching against that. This is why Alex has both an `Alex (lid)` and `Alex (whatsapp)` profile — they may be the same person with different JID formats.
+## Model
 
----
+Default: `openai/gpt-4.1-nano`. Can be overridden per-contact via `llm_model` field on the contact, or via global `llm_model` setting.
 
-## Group Chats — Auto-Reply Guard
+## Debounce
 
-`Familie` (family group chat) has explicit note:
-```
-"note": "GROUP CHAT - do not auto-reply, only draft"
-```
+Inbound messages are debounced per JID — a conversation must be quiet for a random delay between `debounce_min_secs` (default: 120) and `debounce_max_secs` (default: 600) before a draft is auto-generated.
 
-Group chats should be `manual` or `draft` mode — never `auto`. The system has no way to enforce this automatically (it's a configuration decision), but the `contacts.json` profile documents it as guidance.
+The debounce state is persisted in the `debounce` table so crashes don't cause duplicate fires on restart.
 
----
+## A/B Test Infrastructure
 
-## Rate Limiting — In-Memory
+The `draft_outcomes` table and `ab_test_enabled` setting exist but the simplified pipeline doesn't currently use them. The infrastructure was built for multi-variant comparison (model, temperature, etc.) but is not active with the current setup.
 
-The rate limiter (`checkRateLimit()` in `index.ts`) is in-memory:
-- Not persisted across server restarts
-- Per-process only (no shared state if server is scaled)
+## LID vs Standard JID
 
-This is acceptable for MVP. Production would want Redis or similar.
+WhatsApp privacy mode uses `@lid` JIDs. The system matches contacts by phone number extraction, so both LID and standard JIDs for the same phone work correctly.
 
----
+## Audit Logging
 
-## OpenRouter Cost Estimation
+The `audit_log` table records all significant events. When `llm_call: true`, `llm_prompt_tokens` and `llm_completion_tokens` are also recorded.
 
-`estimateCost()` in `client.ts` uses a hardcoded pricing table, not live OpenRouter pricing API. Prices can change; this is a simplification. For accurate billing, would need to call OpenRouter's `/api/v1/models` or use their usage API.
+## Media Messages
+
+Media messages are filtered from conversation context (📎 Media, 📷 Image, 🎥 Video, 🎵 Audio, 🏷️ Sticker, "Reacted ..."). These are stored in the DB but excluded from the LLM context to avoid noise.
+
+## Output Format
+
+The LLM is instructed to output **only the message text** — no quotes, no labels, no JSON (unless multiple separate messages are genuinely needed). Multiple messages formatted as `["first", "second"]` — max 2.
+
+Emoji: match the contact's energy. If she uses none, use none. If she uses 1, use 1. Never stack.
+
+## WebSocket
+
+The `Hub` type in `internal/api/hub.go` manages WebSocket connections. It broadcasts events (new_message, draft_created, etc.) to all connected clients. Used by the frontend to show real-time updates without polling.
